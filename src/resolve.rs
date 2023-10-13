@@ -12,17 +12,18 @@ use crate::compile_util;
 
 const UNNAMED: &str = "C2RustUnnamed";
 
-pub fn check(path: &Path) -> bool {
+pub fn check<P: AsRef<Path>>(path: P) {
     let input = compile_util::path_to_input(path);
     let (config, arc) = compile_util::make_counting_config(input);
     compile_util::run_compiler(config, |_, tcx| {
         let _ = tcx.analysis(());
-    });
+    })
+    .unwrap();
     let errors = *arc.lock().unwrap();
-    errors == 0
+    assert_eq!(errors, 0);
 }
 
-pub fn rename_unnamed(path: &Path) {
+pub fn rename_unnamed<P: AsRef<Path>>(path: P) {
     let input = compile_util::path_to_input(path);
     let config = compile_util::make_config(input);
     let suggestions = compile_util::run_compiler(config, |source_map, tcx| {

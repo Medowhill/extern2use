@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use extern2use::*;
@@ -6,16 +9,61 @@ use extern2use::*;
 #[derive(Parser, Debug)]
 struct Args {
     #[clap(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
     input: PathBuf,
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
-    assert!(resolve::check(&args.input), "initial");
-    resolve::rename_unnamed(&args.input);
-    assert!(resolve::check(&args.input), "after renaming");
-    resolve::deduplicate(&args.input);
-    assert!(resolve::check(&args.input), "after deduplication");
+    let dir = if let Some(output) = &mut args.output {
+        output.push(args.input.file_name().unwrap());
+        if output.exists() {
+            assert!(output.is_dir());
+            clear_dir(&output);
+        } else {
+            fs::create_dir(&output).unwrap();
+        }
+        copy_dir(&args.input, &output, true);
+        output
+    } else {
+        &args.input
+    };
+    let file = dir.join("c2rust-lib.rs");
+
+    println!("init");
+    resolve::check(&file);
+
+    println!("rename");
+    resolve::rename_unnamed(&file);
+    resolve::check(&file);
+
+    println!("deduplicate");
+    resolve::deduplicate(&file);
+    resolve::check(&file);
+}
+
+fn clear_dir<P: AsRef<Path>>(path: P) {
+    for entry in fs::read_dir(path).unwrap() {
+        let entry_path = entry.unwrap().path();
+        if entry_path.is_dir() {
+            fs::remove_dir_all(entry_path).unwrap();
+        } else {
+            fs::remove_file(entry_path).unwrap();
+        }
+    }
+}
+
+fn copy_dir<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q, root: bool) {
+    for entry in fs::read_dir(src).unwrap() {
+        let src_path = entry.unwrap().path();
+        let name = src_path.file_name().unwrap();
+        let dst_path = dst.as_ref().join(name);
+        if src_path.is_file() {
+            fs::copy(src_path, dst_path).unwrap();
+        } else if src_path.is_dir() && (!root || name != "target") {
+            fs::create_dir(&dst_path).unwrap();
+            copy_dir(src_path, dst_path, false);
+        }
+    }
 }
