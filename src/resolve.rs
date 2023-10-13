@@ -327,9 +327,14 @@ pub fn deduplicate<P: AsRef<Path>>(path: P) {
 fn mk_rust_path<P: AsRef<Path>, Q: AsRef<Path>, S: AsRef<str>>(dir: P, path: Q, name: S) -> String {
     let mut path = path.as_ref().strip_prefix(dir).unwrap().to_path_buf();
     path.set_extension("");
-    std::iter::once("crate")
-        .chain(path.components().map(|c| c.as_os_str().to_str().unwrap()))
-        .chain(std::iter::once(name.as_ref()))
-        .intersperse("::")
-        .collect()
+    let mut res = "crate".to_string();
+    for c in path.components() {
+        res += "::";
+        let seg = c.as_os_str().to_str().unwrap();
+        let seg = if seg == "mod" { "r#mod" } else { seg };
+        res += seg;
+    }
+    res += "::";
+    res += name.as_ref();
+    res
 }
