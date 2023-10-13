@@ -32,6 +32,7 @@
 #![warn(variant_size_differences)]
 #![feature(rustc_private)]
 #![feature(iter_intersperse)]
+#![feature(file_create_new)]
 
 extern crate rustc_data_structures;
 extern crate rustc_driver;

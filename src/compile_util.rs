@@ -25,18 +25,10 @@ use rustc_span::{
 };
 use rustfix::{LinePosition, LineRange, Replacement, Snippet, Solution, Suggestion};
 
-pub fn run_compiler<R: Send, F: FnOnce(&SourceMap, TyCtxt<'_>) -> R + Send>(
-    config: Config,
-    f: F,
-) -> Option<R> {
+pub fn run_compiler<R: Send, F: FnOnce(TyCtxt<'_>) -> R + Send>(config: Config, f: F) -> Option<R> {
     rustc_driver::catch_fatal_errors(|| {
         rustc_interface::run_compiler(config, |compiler| {
-            compiler.enter(|queries| {
-                queries.global_ctxt().ok()?.enter(|tcx| {
-                    let source_map = compiler.session().source_map();
-                    Some(f(source_map, tcx))
-                })
-            })
+            compiler.enter(|queries| queries.global_ctxt().ok()?.enter(|tcx| Some(f(tcx))))
         })
     })
     .ok()?

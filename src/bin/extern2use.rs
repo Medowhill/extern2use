@@ -31,16 +31,27 @@ fn main() {
     };
     let file = dir.join("c2rust-lib.rs");
 
-    println!("init");
+    println!("initialize");
     resolve::check(&file);
 
-    println!("rename");
+    println!("rename unnamed");
     resolve::rename_unnamed(&file);
     resolve::check(&file);
 
-    println!("deduplicate");
-    resolve::deduplicate(&file);
+    println!("deduplicate types");
+    resolve::deduplicate_types(&file);
     resolve::check(&file);
+
+    println!("deduplicate type aliases");
+    while resolve::deduplicate_type_aliases(&file) {}
+    resolve::check(&file);
+
+    println!("deduplicate functions");
+    resolve::deduplicate_fns(&file);
+    resolve::check(&file);
+
+    println!("add bin");
+    resolve::add_bin(&file);
 }
 
 fn clear_dir<P: AsRef<Path>>(path: P) {
