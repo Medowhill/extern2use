@@ -335,6 +335,8 @@ pub fn deduplicate_fns<P: AsRef<Path>>(path: P) {
 
         let mut functions = BTreeMap::new();
         let mut ffunctions: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        let mut variables = BTreeMap::new();
+        let mut fvariables: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let mut uspans = BTreeMap::new();
 
         for id in hir.items() {
@@ -349,15 +351,30 @@ pub fn deduplicate_fns<P: AsRef<Path>>(path: P) {
                         functions.insert(sig, rp);
                     }
                 }
+                ItemKind::Static(ty, _, _) => {
+                    if tcx.visibility(item.owner_id).is_public() {
+                        let rp = mk_rust_path(&dir, &file, "crate", &name);
+                        let ty = ty_to_string(ty, tcx);
+                        variables.insert((name, ty), rp);
+                    }
+                }
                 ItemKind::ForeignMod { items, .. } => {
                     let fv = ffunctions.entry(file.clone()).or_default();
+                    let vv = fvariables.entry(file.clone()).or_default();
                     for item in items.iter() {
                         let item = hir.foreign_item(item.id);
                         let name = item.ident.name.to_ident_string();
                         let span = source_map.span_extend_to_line(item.span);
-                        if let ForeignItemKind::Fn(decl, _, _) = &item.kind {
-                            let sig = FunSig::new(name, decl, tcx);
-                            fv.push((sig, span));
+                        match &item.kind {
+                            ForeignItemKind::Fn(decl, _, _) => {
+                                let sig = FunSig::new(name, decl, tcx);
+                                fv.push((sig, span));
+                            }
+                            ForeignItemKind::Static(ty, _) => {
+                                let ty = ty_to_string(ty, tcx);
+                                vv.push(((name, ty), span));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -374,7 +391,7 @@ pub fn deduplicate_fns<P: AsRef<Path>>(path: P) {
         let mut suggestions: BTreeMap<_, Vec<_>> = BTreeMap::new();
 
         for (p, fs) in ffunctions {
-            let mut v = vec![];
+            let v = suggestions.entry(p.clone()).or_default();
             let uspan = uspans.get(&p).unwrap();
 
             for (sig, span) in fs {
@@ -389,9 +406,23 @@ pub fn deduplicate_fns<P: AsRef<Path>>(path: P) {
                 let suggestion = compile_util::make_suggestion(snippet, "");
                 v.push(suggestion);
             }
+        }
 
-            if !v.is_empty() {
-                suggestions.insert(p.clone(), v);
+        for (p, vs) in fvariables {
+            let v = suggestions.entry(p.clone()).or_default();
+            let uspan = uspans.get(&p).unwrap();
+
+            for (ty, span) in vs {
+                let rp = some_or!(variables.get(&ty), continue);
+
+                let stmt = format!("\nuse {};", rp);
+                let snippet = compile_util::span_to_snippet(*uspan, source_map);
+                let suggestion = compile_util::make_suggestion(snippet, &stmt);
+                v.push(suggestion);
+
+                let snippet = compile_util::span_to_snippet(span, source_map);
+                let suggestion = compile_util::make_suggestion(snippet, "");
+                v.push(suggestion);
             }
         }
 
