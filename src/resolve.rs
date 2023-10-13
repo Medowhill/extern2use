@@ -162,7 +162,10 @@ impl FunSig {
     }
 }
 
-pub fn deduplicate(path: &Path) {
+pub fn deduplicate<P: AsRef<Path>>(path: P) {
+    let mut dir = path.as_ref().to_path_buf();
+    dir.pop();
+
     let input = compile_util::path_to_input(path);
     let config = compile_util::make_config(input);
     let suggestions = compile_util::run_compiler(config, |source_map, tcx| {
@@ -174,8 +177,6 @@ pub fn deduplicate(path: &Path) {
         let mut uspans = BTreeMap::new();
         let mut structs: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let mut impls = BTreeMap::new();
-        let mut dir = path.to_path_buf();
-        dir.pop();
 
         for id in hir.items() {
             let item = hir.item(id);
@@ -276,11 +277,35 @@ pub fn deduplicate(path: &Path) {
             }
         }
 
+        let mut foreign_types: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for (file, ts) in ftypes {
             let v = suggestions.entry(file.clone()).or_default();
             let uspan = uspans.get(&file).unwrap();
             for (ty, span) in ts {
-                let rp = some_or!(struct_map.get(&ty), continue);
+                if let Some(rp) = struct_map.get(&ty) {
+                    let stmt = format!("\nuse {};", rp);
+                    let snippet = compile_util::span_to_snippet(*uspan, source_map);
+                    let suggestion = compile_util::make_suggestion(snippet, &stmt);
+                    v.push(suggestion);
+
+                    let snippet = compile_util::span_to_snippet(span, source_map);
+                    let suggestion = compile_util::make_suggestion(snippet, "");
+                    v.push(suggestion);
+                } else {
+                    foreign_types
+                        .entry(ty)
+                        .or_default()
+                        .push((file.clone(), span));
+                }
+            }
+        }
+
+        for (ty, mut fss) in foreign_types {
+            let (file, _) = fss.pop().unwrap();
+            let rp = mk_rust_path(&dir, file, ty);
+            for (file, span) in fss {
+                let v = suggestions.entry(file.clone()).or_default();
+                let uspan = uspans.get(&file).unwrap();
 
                 let stmt = format!("\nuse {};", rp);
                 let snippet = compile_util::span_to_snippet(*uspan, source_map);
@@ -299,12 +324,12 @@ pub fn deduplicate(path: &Path) {
     compile_util::apply_suggestions(&suggestions);
 }
 
-fn mk_rust_path(dir: &Path, path: &Path, name: &str) -> String {
-    let mut path = path.strip_prefix(dir).unwrap().to_path_buf();
+fn mk_rust_path<P: AsRef<Path>, Q: AsRef<Path>, S: AsRef<str>>(dir: P, path: Q, name: S) -> String {
+    let mut path = path.as_ref().strip_prefix(dir).unwrap().to_path_buf();
     path.set_extension("");
     std::iter::once("crate")
         .chain(path.components().map(|c| c.as_os_str().to_str().unwrap()))
-        .chain(std::iter::once(name))
+        .chain(std::iter::once(name.as_ref()))
         .intersperse("::")
         .collect()
 }
