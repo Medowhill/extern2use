@@ -140,14 +140,19 @@ impl<'tcx> Resolver<'tcx> {
     fn rename_unnamed(&self) -> Suggestions {
         let mut next_idx = 0;
         let mut types: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        let mut impls = BTreeMap::new();
+
         for id in self.hir().items() {
             let item = self.hir().item(id);
             let name = item.ident.name.to_ident_string();
+            let file = some_or!(self.span_to_path(item.span), continue);
+
             let idx = some_or!(name.strip_prefix(UNNAMED), continue);
             if let Some(i) = idx.strip_prefix('_') {
                 let i: usize = i.parse().unwrap();
                 next_idx = next_idx.max(i + 1);
             }
+
             match &item.kind {
                 ItemKind::Struct(v, _) | ItemKind::Union(v, _) => {
                     let is_struct = matches!(item.kind, ItemKind::Struct(_, _)) as usize;
@@ -163,6 +168,14 @@ impl<'tcx> Resolver<'tcx> {
                 ItemKind::TyAlias(ty, _) => {
                     let fs = vec![self.span_to_string(ty.span)];
                     types.entry((2, fs)).or_default().push(item);
+                }
+                ItemKind::Impl(i) => {
+                    if let TyKind::Path(QPath::Resolved(_, path)) = &i.self_ty.kind {
+                        let seg = path.segments.last().unwrap();
+                        let name = seg.ident.name.to_ident_string().to_string();
+                        let span = self.source_map().span_extend_to_line(item.span);
+                        impls.insert((file, name), span);
+                    }
                 }
                 _ => {}
             }
@@ -183,21 +196,28 @@ impl<'tcx> Resolver<'tcx> {
             }
 
             for (file, items) in per_file {
-                let v = suggestions.entry(file).or_default();
+                let v = suggestions.entry(file.clone()).or_default();
 
                 let mut first = true;
                 for item in items {
-                    let new_name2 = if first {
+                    if first {
+                        let snippet = self.span_to_snippet(item.ident.span);
+                        let suggestion = compile_util::make_suggestion(snippet, &new_name);
+                        v.push(suggestion);
+
                         first = false;
-                        new_name.clone()
                     } else {
-                        let new_name = format!("{}_{}", UNNAMED, next_idx);
-                        next_idx += 1;
-                        new_name
-                    };
-                    let snippet = self.span_to_snippet(item.ident.span);
-                    let suggestion = compile_util::make_suggestion(snippet, &new_name2);
-                    v.push(suggestion);
+                        let name = item.ident.name.to_ident_string();
+                        let span = if let Some(impl_span) = impls.get(&(file.clone(), name.clone()))
+                        {
+                            item.span.with_lo(impl_span.lo())
+                        } else {
+                            item.span
+                        };
+                        let snippet = self.span_to_snippet(span);
+                        let suggestion = compile_util::make_suggestion(snippet, "");
+                        v.push(suggestion);
+                    }
 
                     let name = item.ident.name.to_ident_string();
                     let def_id = item.item_id().owner_id.def_id.to_def_id();
