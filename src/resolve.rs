@@ -95,7 +95,7 @@ pub fn add_bin(path: &Path) {
         .unwrap();
 
     for rp in rps {
-        let name = rp.replace("::", "_");
+        let name = rp.replace("::", "_").replace("r#", "");
         let filename = format!("{}.rs", name);
         let path = dir.join(&filename);
         let mut file = File::create_new(path).unwrap();
@@ -415,7 +415,7 @@ impl<'tcx> Resolver<'tcx> {
                 ItemKind::Static(ty, _, _) => {
                     if self.tcx.visibility(item.owner_id).is_public() {
                         let rp = mk_rust_path(dir, &file, "crate", &name);
-                        let ty = self.ty_to_string(ty);
+                        let ty = clear_len(&self.ty_to_string(ty));
                         variables.insert((name, ty), rp);
                     }
                 }
@@ -436,7 +436,7 @@ impl<'tcx> Resolver<'tcx> {
                                 fv.push((sig, span));
                             }
                             ForeignItemKind::Static(ty, _) => {
-                                let ty = self.ty_to_string(ty);
+                                let ty = clear_len(&self.ty_to_string(ty));
                                 vv.push(((name, ty), span));
                             }
                             _ => {}
@@ -586,4 +586,9 @@ fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
     res += "::";
     res += name;
     res
+}
+
+fn clear_len(s: &str) -> String {
+    let re = regex::Regex::new(r"; \d*]").unwrap();
+    re.replace_all(s, "; 0]").to_string()
 }
