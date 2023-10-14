@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
@@ -32,15 +32,16 @@ pub fn check(path: &Path) {
     assert_eq!(errors, 0);
 }
 
-pub fn rename_unnamed(path: &Path) {
+pub fn rename_unnamed(path: &Path) -> bool {
     let input = compile_util::path_to_input(path);
     let config = compile_util::make_config(input);
     let suggestions =
         compile_util::run_compiler(config, |tcx| Resolver::new(tcx).rename_unnamed()).unwrap();
     compile_util::apply_suggestions(&suggestions);
+    !suggestions.is_empty()
 }
 
-pub fn deduplicate_types(path: &Path) {
+pub fn deduplicate_types(path: &Path) -> bool {
     let mut dir = path.to_path_buf();
     dir.pop();
 
@@ -50,6 +51,7 @@ pub fn deduplicate_types(path: &Path) {
         compile_util::run_compiler(config, |tcx| Resolver::new(tcx).deduplicate_types(&dir))
             .unwrap();
     compile_util::apply_suggestions(&suggestions);
+    !suggestions.is_empty()
 }
 
 pub fn deduplicate_type_aliases(path: &Path) -> bool {
@@ -66,7 +68,7 @@ pub fn deduplicate_type_aliases(path: &Path) -> bool {
     !suggestions.is_empty()
 }
 
-pub fn deduplicate_fns(path: &Path) {
+pub fn deduplicate_fns(path: &Path) -> bool {
     let mut dir = path.to_path_buf();
     dir.pop();
 
@@ -75,6 +77,7 @@ pub fn deduplicate_fns(path: &Path) {
     let suggestions =
         compile_util::run_compiler(config, |tcx| Resolver::new(tcx).deduplicate_fns(&dir)).unwrap();
     compile_util::apply_suggestions(&suggestions);
+    !suggestions.is_empty()
 }
 
 pub fn add_bin(path: &Path) {
@@ -145,7 +148,16 @@ impl<'tcx> Resolver<'tcx> {
         for id in self.hir().items() {
             let item = self.hir().item(id);
             let name = item.ident.name.to_ident_string();
-            let file = some_or!(self.span_to_path(item.span), continue);
+
+            if let ItemKind::Impl(i) = &item.kind {
+                if let TyKind::Path(QPath::Resolved(_, path)) = &i.self_ty.kind {
+                    let file = some_or!(self.span_to_path(item.span), continue);
+                    let seg = path.segments.last().unwrap();
+                    let name = seg.ident.name.to_ident_string().to_string();
+                    let span = self.source_map().span_extend_to_line(item.span);
+                    impls.insert((file, name), span);
+                }
+            }
 
             let idx = some_or!(name.strip_prefix(UNNAMED), continue);
             if let Some(i) = idx.strip_prefix('_') {
@@ -169,14 +181,6 @@ impl<'tcx> Resolver<'tcx> {
                     let fs = vec![self.span_to_string(ty.span)];
                     types.entry((2, fs)).or_default().push(item);
                 }
-                ItemKind::Impl(i) => {
-                    if let TyKind::Path(QPath::Resolved(_, path)) = &i.self_ty.kind {
-                        let seg = path.segments.last().unwrap();
-                        let name = seg.ident.name.to_ident_string().to_string();
-                        let span = self.source_map().span_extend_to_line(item.span);
-                        impls.insert((file, name), span);
-                    }
-                }
                 _ => {}
             }
         }
@@ -186,6 +190,14 @@ impl<'tcx> Resolver<'tcx> {
 
         let mut suggestions: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for items in types.into_values() {
+            let names: BTreeSet<_> = items
+                .iter()
+                .map(|item| item.ident.name.to_string())
+                .collect();
+            if names.len() == 1 {
+                continue;
+            }
+
             let new_name = format!("{}_{}", UNNAMED, next_idx);
             next_idx += 1;
 
@@ -414,6 +426,10 @@ impl<'tcx> Resolver<'tcx> {
                         let item = self.hir().foreign_item(item.id);
                         let name = item.ident.name.to_ident_string();
                         let span = self.source_map().span_extend_to_line(item.span);
+                        let hir_id = self.hir().local_def_id_to_hir_id(item.owner_id.def_id);
+                        let attrs = self.hir().attrs(hir_id);
+                        let min = attrs.iter().map(|a| a.span.lo()).min().unwrap_or(span.lo());
+                        let span = span.with_lo(min);
                         match &item.kind {
                             ForeignItemKind::Fn(decl, _, _) => {
                                 let sig = self.mk_fun_sig(name, decl);
@@ -562,7 +578,9 @@ fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
     for c in path.components() {
         res += "::";
         let seg = c.as_os_str().to_str().unwrap();
-        let seg = if seg == "mod" { "r#mod" } else { seg };
+        if seg == "mod" || seg == "match" {
+            res += "r#";
+        }
         res += seg;
     }
     res += "::";

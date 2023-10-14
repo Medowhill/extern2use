@@ -82,8 +82,8 @@ pub fn str_to_input(code: &str) -> Input {
     }
 }
 
-pub fn path_to_input<P: AsRef<Path>>(path: P) -> Input {
-    Input::File(path.as_ref().to_path_buf())
+pub fn path_to_input(path: &Path) -> Input {
+    Input::File(path.to_path_buf())
 }
 
 pub fn span_to_path(span: Span, source_map: &SourceMap) -> Option<PathBuf> {

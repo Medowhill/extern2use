@@ -35,7 +35,7 @@ fn main() {
     resolve::check(&file);
 
     println!("rename unnamed");
-    resolve::rename_unnamed(&file);
+    while resolve::rename_unnamed(&file) {}
     resolve::check(&file);
 
     println!("deduplicate types");
