@@ -6,6 +6,7 @@ use std::{
 };
 
 use etrace::some_or;
+use lazy_static::lazy_static;
 use rustc_hir::{
     def::Res, def_id::DefId, intravisit, intravisit::Visitor, FnDecl, FnRetTy, ForeignItemKind,
     HirId, ItemKind, QPath, Ty, TyKind, VariantData,
@@ -578,7 +579,7 @@ fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
     for c in path.components() {
         res += "::";
         let seg = c.as_os_str().to_str().unwrap();
-        if seg == "mod" || seg == "match" {
+        if KEYWORDS.contains(seg) {
             res += "r#";
         }
         res += seg;
@@ -591,4 +592,16 @@ fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
 fn clear_len(s: &str) -> String {
     let re = regex::Regex::new(r"; \d*]").unwrap();
     re.replace_all(s, "; 0]").to_string()
+}
+
+lazy_static! {
+    static ref KEYWORDS: BTreeSet<&'static str> = [
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+    ]
+    .into_iter()
+    .collect();
 }
