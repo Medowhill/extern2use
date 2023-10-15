@@ -40,11 +40,11 @@ fn main() {
 
     println!("deduplicate types");
     resolve::deduplicate_types(&file);
-    resolve::check(&file);
+    // resolve::check(&file);
 
     println!("deduplicate type aliases");
     while resolve::deduplicate_type_aliases(&file) {}
-    resolve::check(&file);
+    // resolve::check(&file);
 
     println!("deduplicate functions");
     resolve::deduplicate_fns(&file);

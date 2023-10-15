@@ -112,13 +112,17 @@ pub fn add_bin(path: &Path) {
 
 struct Resolver<'tcx> {
     tcx: TyCtxt<'tcx>,
+    uses: BTreeMap<PathBuf, BTreeSet<String>>,
 }
 
 type Suggestions = BTreeMap<PathBuf, Vec<Suggestion>>;
 
 impl<'tcx> Resolver<'tcx> {
     fn new(tcx: TyCtxt<'tcx>) -> Self {
-        Self { tcx }
+        Self {
+            tcx,
+            uses: BTreeMap::new(),
+        }
     }
 
     fn hir(&self) -> Map<'tcx> {
@@ -139,6 +143,10 @@ impl<'tcx> Resolver<'tcx> {
 
     fn span_to_string(&self, span: Span) -> String {
         self.source_map().span_to_snippet(span).unwrap()
+    }
+
+    fn add_use(&mut self, file: PathBuf, path: String) {
+        self.uses.entry(file).or_default().insert(path);
     }
 
     fn rename_unnamed(&self) -> Suggestions {
@@ -247,6 +255,7 @@ impl<'tcx> Resolver<'tcx> {
             }
         }
 
+        suggestions.retain(|_, v| !v.is_empty());
         suggestions
     }
 
@@ -317,7 +326,7 @@ impl<'tcx> Resolver<'tcx> {
                 let uspan = uspans.get(&file).unwrap();
                 let impl_span = impls.get(&(file.clone(), name.clone())).unwrap();
                 let span = span.with_lo(impl_span.lo());
-                self.replace_with_use(&rp, *uspan, span, v);
+                self.replace_with_use(&rp, *uspan, span, &file, v);
             }
         }
 
@@ -327,7 +336,7 @@ impl<'tcx> Resolver<'tcx> {
             let uspan = uspans.get(&file).unwrap();
             for (ty, span) in ts {
                 if let Some(rp) = struct_map.get(&ty) {
-                    self.replace_with_use(rp, *uspan, span, v);
+                    self.replace_with_use(rp, *uspan, span, &file, v);
                 } else {
                     foreign_types
                         .entry(ty)
@@ -343,10 +352,11 @@ impl<'tcx> Resolver<'tcx> {
             for (file, span) in fss {
                 let v = suggestions.entry(file.clone()).or_default();
                 let uspan = uspans.get(&file).unwrap();
-                self.replace_with_use(&rp, *uspan, span, v);
+                self.replace_with_use(&rp, *uspan, span, &file, v);
             }
         }
 
+        suggestions.retain(|_, v| !v.is_empty());
         suggestions
     }
 
@@ -387,14 +397,15 @@ impl<'tcx> Resolver<'tcx> {
             for (file, span) in fss {
                 let v = suggestions.entry(file.clone()).or_default();
                 let uspan = uspans.get(&file).unwrap();
-                self.replace_with_use(&rp, *uspan, span, v);
+                self.replace_with_use(&rp, *uspan, span, &file, v);
             }
         }
 
+        suggestions.retain(|_, v| !v.is_empty());
         suggestions
     }
 
-    fn deduplicate_fns(&self, dir: &Path) -> Suggestions {
+    fn deduplicate_fns(&mut self, dir: &Path) -> Suggestions {
         let mut functions = BTreeMap::new();
         let mut ffunctions: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let mut variables = BTreeMap::new();
@@ -447,22 +458,22 @@ impl<'tcx> Resolver<'tcx> {
                 ItemKind::Use(path, _) => {
                     let seg = path.segments.last().unwrap();
                     if seg.ident.name.to_ident_string() == "libc" {
-                        uspans.insert(file, item.span.shrink_to_hi());
+                        uspans.insert(file.clone(), item.span.shrink_to_hi());
                     }
+                    self.add_use(file, self.span_to_string(path.span));
                 }
                 _ => {}
             }
         }
 
         let mut suggestions: BTreeMap<_, Vec<_>> = BTreeMap::new();
-
         for (p, fs) in ffunctions {
             let v = suggestions.entry(p.clone()).or_default();
             let uspan = uspans.get(&p).unwrap();
 
             for (sig, span) in fs {
                 let rp = some_or!(functions.get(&sig), continue);
-                self.replace_with_use(rp, *uspan, span, v);
+                self.replace_with_use(rp, *uspan, span, &p, v);
             }
         }
 
@@ -472,10 +483,11 @@ impl<'tcx> Resolver<'tcx> {
 
             for (ty, span) in vs {
                 let rp = some_or!(variables.get(&ty), continue);
-                self.replace_with_use(rp, *uspan, span, v);
+                self.replace_with_use(rp, *uspan, span, &p, v);
             }
         }
 
+        suggestions.retain(|_, v| !v.is_empty());
         suggestions
     }
 
@@ -492,11 +504,21 @@ impl<'tcx> Resolver<'tcx> {
         rps
     }
 
-    fn replace_with_use(&self, rp: &str, uspan: Span, span: Span, v: &mut Vec<Suggestion>) {
-        let stmt = format!("\nuse {};", rp);
-        let snippet = self.span_to_snippet(uspan);
-        let suggestion = compile_util::make_suggestion(snippet, &stmt);
-        v.push(suggestion);
+    fn replace_with_use(
+        &self,
+        rp: &str,
+        uspan: Span,
+        span: Span,
+        file: &PathBuf,
+        v: &mut Vec<Suggestion>,
+    ) {
+        let empty = BTreeSet::new();
+        if !self.uses.get(file).unwrap_or(&empty).contains(rp) {
+            let stmt = format!("\nuse {};", rp);
+            let snippet = self.span_to_snippet(uspan);
+            let suggestion = compile_util::make_suggestion(snippet, &stmt);
+            v.push(suggestion);
+        }
 
         let snippet = self.span_to_snippet(span);
         let suggestion = compile_util::make_suggestion(snippet, "");
@@ -521,10 +543,14 @@ impl<'tcx> Resolver<'tcx> {
             .into_iter()
             .flat_map(|(def_id, spans)| {
                 let def_path = self.tcx.def_path_str(def_id);
-                spans
-                    .into_iter()
-                    .map(|span| (self.span_to_string(span), def_path.clone()))
-                    .collect::<Vec<_>>()
+                if def_path == "std::option::Option" {
+                    vec![]
+                } else {
+                    spans
+                        .into_iter()
+                        .map(|span| (self.span_to_string(span), def_path.clone()))
+                        .collect::<Vec<_>>()
+                }
             })
             .collect();
         substs.sort_by_key(|(s, _)| usize::MAX - s.len());
