@@ -8,8 +8,11 @@ use std::{
 use etrace::some_or;
 use lazy_static::lazy_static;
 use rustc_hir::{
-    def::Res, def_id::DefId, intravisit, intravisit::Visitor, FnDecl, FnRetTy, ForeignItemKind,
-    HirId, ItemKind, QPath, Ty, TyKind, VariantData,
+    def::{DefKind, Res},
+    def_id::DefId,
+    intravisit,
+    intravisit::Visitor,
+    FnDecl, FnRetTy, ForeignItemKind, HirId, ItemKind, PatKind, QPath, Ty, TyKind, VariantData,
 };
 use rustc_middle::{
     hir::{map::Map, nested_filter},
@@ -77,6 +80,18 @@ pub fn deduplicate_fns(path: &Path) -> bool {
     let config = compile_util::make_config(input);
     let suggestions =
         compile_util::run_compiler(config, |tcx| Resolver::new(tcx).deduplicate_fns(&dir)).unwrap();
+    compile_util::apply_suggestions(&suggestions);
+    !suggestions.is_empty()
+}
+
+pub fn resolve_conflicts(path: &Path) -> bool {
+    let mut dir = path.to_path_buf();
+    dir.pop();
+
+    let input = compile_util::path_to_input(path);
+    let config = compile_util::make_config(input);
+    let suggestions =
+        compile_util::run_compiler(config, |tcx| Resolver::new(tcx).resolve_conflicts()).unwrap();
     compile_util::apply_suggestions(&suggestions);
     !suggestions.is_empty()
 }
@@ -491,6 +506,63 @@ impl<'tcx> Resolver<'tcx> {
         suggestions
     }
 
+    fn resolve_conflicts(&mut self) -> Suggestions {
+        let mut suggestions: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        let mut locals: BTreeMap<_, BTreeMap<_, Vec<_>>> = BTreeMap::new();
+        let mut uses: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+
+        for id in self.hir().items() {
+            let item = self.hir().item(id);
+            let file = some_or!(self.span_to_path(item.span), continue);
+            match &item.kind {
+                ItemKind::Fn(_, _, body_id) => {
+                    let body = self.hir().body(*body_id);
+                    let mut visitor = LocalVisitor::new(self.tcx);
+                    visitor.visit_body(body);
+                    for (name, spans) in visitor.locals {
+                        locals
+                            .entry(file.clone())
+                            .or_default()
+                            .entry(name)
+                            .or_default()
+                            .extend(spans);
+                    }
+                }
+                ItemKind::Use(path, _) => {
+                    let is_static = path
+                        .res
+                        .iter()
+                        .any(|res| matches!(res, Res::Def(DefKind::Static(_), _)));
+                    if is_static {
+                        let seg = path.segments.last().unwrap().ident.name.to_ident_string();
+                        uses.entry(file.clone()).or_default().insert(seg);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let empty = BTreeSet::new();
+        for (file, locals) in locals {
+            let uses = uses.get(&file).unwrap_or(&empty);
+            let v = suggestions.entry(file).or_default();
+            for (name, spans) in locals {
+                if !uses.contains(&name) {
+                    continue;
+                }
+                let new_name = format!("{}__new", name);
+                for span in spans {
+                    let snippet = self.span_to_snippet(span);
+                    let suggestion = compile_util::make_suggestion(snippet, &new_name);
+                    v.push(suggestion);
+                }
+            }
+        }
+
+        suggestions.retain(|_, v| !v.is_empty());
+        suggestions
+    }
+
     fn find_mains(&self, dir: &Path) -> Vec<String> {
         let mut rps = vec![];
         for id in self.hir().items() {
@@ -586,6 +658,49 @@ impl<'tcx> Visitor<'tcx> for PathVisitor<'tcx> {
     fn visit_path(&mut self, path: &rustc_hir::Path<'tcx>, _: HirId) {
         if let Res::Def(_, def_id) = path.res {
             self.paths.entry(def_id).or_default().push(path.span);
+        }
+        intravisit::walk_path(self, path);
+    }
+}
+
+struct LocalVisitor<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    locals: BTreeMap<String, Vec<Span>>,
+}
+
+impl<'tcx> LocalVisitor<'tcx> {
+    fn new(tcx: TyCtxt<'tcx>) -> Self {
+        Self {
+            tcx,
+            locals: BTreeMap::new(),
+        }
+    }
+}
+
+impl<'tcx> Visitor<'tcx> for LocalVisitor<'tcx> {
+    type NestedFilter = nested_filter::OnlyBodies;
+
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
+    }
+
+    fn visit_pat(&mut self, pat: &'tcx rustc_hir::Pat<'tcx>) {
+        if let PatKind::Binding(_, _, id, _) = pat.kind {
+            let name = id.name.to_ident_string();
+            self.locals.entry(name).or_default().push(id.span);
+        }
+        intravisit::walk_pat(self, pat);
+    }
+
+    fn visit_path(&mut self, path: &rustc_hir::Path<'tcx>, _: HirId) {
+        if matches!(path.res, Res::Local(_)) {
+            let name = self
+                .tcx
+                .sess
+                .source_map()
+                .span_to_snippet(path.span)
+                .unwrap();
+            self.locals.entry(name).or_default().push(path.span);
         }
         intravisit::walk_path(self, path);
     }
