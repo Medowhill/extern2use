@@ -630,7 +630,11 @@ impl<'tcx> Resolver<'tcx> {
         for (old, new) in substs {
             ty_str = ty_str.replace(&old, &new);
         }
-        ty_str
+        let re = regex::Regex::new(r"\s+").unwrap();
+        re.replace_all(&ty_str, "")
+            .to_string()
+            .replace(",)", ")")
+            .replace(",>", ">")
     }
 }
 
@@ -694,13 +698,9 @@ impl<'tcx> Visitor<'tcx> for LocalVisitor<'tcx> {
 
     fn visit_path(&mut self, path: &rustc_hir::Path<'tcx>, _: HirId) {
         if matches!(path.res, Res::Local(_)) {
-            let name = self
-                .tcx
-                .sess
-                .source_map()
-                .span_to_snippet(path.span)
-                .unwrap();
-            self.locals.entry(name).or_default().push(path.span);
+            if let Ok(name) = self.tcx.sess.source_map().span_to_snippet(path.span) {
+                self.locals.entry(name).or_default().push(path.span);
+            }
         }
         intravisit::walk_path(self, path);
     }
@@ -731,8 +731,8 @@ fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
 }
 
 fn clear_len(s: &str) -> String {
-    let re = regex::Regex::new(r"; \d*]").unwrap();
-    re.replace_all(s, "; 0]").to_string()
+    let re = regex::Regex::new(r";\d*]").unwrap();
+    re.replace_all(s, ";0]").to_string()
 }
 
 lazy_static! {
