@@ -34,6 +34,7 @@
 #![feature(iter_intersperse)]
 #![feature(file_create_new)]
 
+extern crate rustc_ast;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_driver_impl;

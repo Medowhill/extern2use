@@ -7,12 +7,14 @@ use std::{
 
 use etrace::some_or;
 use lazy_static::lazy_static;
+use rustc_ast::LitKind;
 use rustc_hir::{
     def::{DefKind, Res},
     def_id::DefId,
     intravisit,
     intravisit::Visitor,
-    FnDecl, FnRetTy, ForeignItemKind, HirId, ItemKind, PatKind, QPath, Ty, TyKind, VariantData,
+    ArrayLen, ExprKind, FnDecl, FnRetTy, ForeignItemKind, GenericArg, HirId, ItemKind, PatKind,
+    QPath, Ty, TyKind, VariantData,
 };
 use rustc_middle::{
     hir::{map::Map, nested_filter},
@@ -389,7 +391,7 @@ impl<'tcx> Resolver<'tcx> {
                         continue;
                     }
                     types
-                        .entry((name, self.ty_to_string(ty)))
+                        .entry((name, self.ty_to_type(ty)))
                         .or_default()
                         .push((file, item.span));
                 }
@@ -425,7 +427,18 @@ impl<'tcx> Resolver<'tcx> {
         let mut ffunctions: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let mut variables = BTreeMap::new();
         let mut fvariables: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        let mut aliases = BTreeMap::new();
         let mut uspans = BTreeMap::new();
+
+        for id in self.hir().items() {
+            let item = self.hir().item(id);
+            if let ItemKind::TyAlias(ty, _) = &item.kind {
+                let def_id = id.owner_id.to_def_id();
+                let name = self.tcx.def_path_str(def_id);
+                let ty = self.ty_to_type(ty);
+                aliases.insert(name, ty);
+            }
+        }
 
         for id in self.hir().items() {
             let item = self.hir().item(id);
@@ -435,14 +448,15 @@ impl<'tcx> Resolver<'tcx> {
                 ItemKind::Fn(sig, _, _) => {
                     if self.tcx.visibility(item.owner_id).is_public() {
                         let rp = mk_rust_path(dir, &file, "crate", &name);
-                        let sig = self.mk_fun_sig(name, sig.decl);
+                        let sig = self.mk_fun_sig(name, sig.decl, &aliases);
                         functions.insert(sig, rp);
                     }
                 }
                 ItemKind::Static(ty, _, _) => {
                     if self.tcx.visibility(item.owner_id).is_public() {
                         let rp = mk_rust_path(dir, &file, "crate", &name);
-                        let ty = clear_len(&self.ty_to_string(ty));
+                        let mut ty = self.ty_to_type_and_subst(ty, &aliases);
+                        ty.clear_len();
                         variables.insert((name, ty), rp);
                     }
                 }
@@ -459,11 +473,12 @@ impl<'tcx> Resolver<'tcx> {
                         let span = span.with_lo(min);
                         match &item.kind {
                             ForeignItemKind::Fn(decl, _, _) => {
-                                let sig = self.mk_fun_sig(name, decl);
+                                let sig = self.mk_fun_sig(name, decl, &aliases);
                                 fv.push((sig, span));
                             }
                             ForeignItemKind::Static(ty, _) => {
-                                let ty = clear_len(&self.ty_to_string(ty));
+                                let mut ty = self.ty_to_type_and_subst(ty, &aliases);
+                                ty.clear_len();
                                 vv.push(((name, ty), span));
                             }
                             _ => {}
@@ -597,44 +612,108 @@ impl<'tcx> Resolver<'tcx> {
         v.push(suggestion);
     }
 
-    fn mk_fun_sig(&self, name: String, decl: &'tcx FnDecl<'tcx>) -> FunSig {
-        let params = decl.inputs.iter().map(|ty| self.ty_to_string(ty)).collect();
+    fn mk_fun_sig(
+        &self,
+        name: String,
+        decl: &'tcx FnDecl<'tcx>,
+        map: &BTreeMap<String, Type>,
+    ) -> FunSig {
+        let params = decl
+            .inputs
+            .iter()
+            .map(|ty| self.ty_to_type_and_subst(ty, map))
+            .collect();
         let ret = if let FnRetTy::Return(ty) = &decl.output {
-            self.ty_to_string(ty)
+            self.ty_to_type_and_subst(ty, map)
         } else {
-            "()".to_string()
+            Type::Tup(vec![])
         };
         FunSig { name, params, ret }
     }
 
-    fn ty_to_string(&self, ty: &'tcx Ty<'tcx>) -> String {
-        let mut visitor = PathVisitor::new(self.tcx);
-        visitor.visit_ty(ty);
-        let mut substs: Vec<_> = visitor
-            .paths
-            .into_iter()
-            .flat_map(|(def_id, spans)| {
-                let def_path = self.tcx.def_path_str(def_id);
-                if def_path == "std::option::Option" {
-                    vec![]
+    fn ty_to_type_and_subst(&self, ty: &'tcx Ty<'tcx>, map: &BTreeMap<String, Type>) -> Type {
+        let mut ty = self.ty_to_type(ty);
+        ty.subst(map);
+        ty
+    }
+
+    fn ty_to_type(&self, ty: &'tcx Ty<'tcx>) -> Type {
+        match &ty.kind {
+            TyKind::Slice(_) => unreachable!("{:?}", ty),
+            TyKind::Array(ty, len) => {
+                let ty = self.ty_to_type(ty);
+                let len = self.get_length(len);
+                Type::Array(Box::new(ty), len)
+            }
+            TyKind::Ptr(mty) => {
+                let ty = self.ty_to_type(mty.ty);
+                let is_mutbl = mty.mutbl.is_mut();
+                Type::Ptr(Box::new(ty), is_mutbl)
+            }
+            TyKind::Ref(_, _) => unreachable!("{:?}", ty),
+            TyKind::BareFn(ty) => {
+                let inputs = ty
+                    .decl
+                    .inputs
+                    .iter()
+                    .map(|ty| self.ty_to_type(ty))
+                    .collect();
+                let output = if let FnRetTy::Return(ty) = &ty.decl.output {
+                    self.ty_to_type(ty)
                 } else {
-                    spans
-                        .into_iter()
-                        .map(|span| (self.span_to_string(span), def_path.clone()))
-                        .collect::<Vec<_>>()
+                    Type::Tup(vec![])
+                };
+                Type::BareFn(inputs, Box::new(output))
+            }
+            TyKind::Never => Type::Never,
+            TyKind::Tup(tys) => Type::Tup(tys.iter().map(|ty| self.ty_to_type(ty)).collect()),
+            TyKind::Path(path) => {
+                if let QPath::Resolved(_, path) = path {
+                    match &path.res {
+                        Res::Def(_, def_id) => {
+                            let def_path_str = self.tcx.def_path_str(def_id);
+                            let args =
+                                if let Some(args) = &path.segments.last().as_ref().unwrap().args {
+                                    args.args
+                                        .iter()
+                                        .filter_map(|arg| {
+                                            if let GenericArg::Type(ty) = arg {
+                                                Some(self.ty_to_type(ty))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    vec![]
+                                };
+                            Type::Path(def_path_str, args)
+                        }
+                        Res::PrimTy(ty) => Type::Path(ty.name_str().to_string(), vec![]),
+                        _ => unreachable!("{:?}", path.res),
+                    }
+                } else {
+                    unreachable!("{:?}", ty);
                 }
-            })
-            .collect();
-        substs.sort_by_key(|(s, _)| usize::MAX - s.len());
-        let mut ty_str = self.span_to_string(ty.span);
-        for (old, new) in substs {
-            ty_str = ty_str.replace(&old, &new);
+            }
+            TyKind::OpaqueDef(_, _, _) => unreachable!("{:?}", ty),
+            TyKind::TraitObject(_, _, _) => unreachable!("{:?}", ty),
+            TyKind::Typeof(_) => unreachable!("{:?}", ty),
+            TyKind::Infer => unreachable!("{:?}", ty),
+            TyKind::Err(_) => unreachable!("{:?}", ty),
         }
-        let re = regex::Regex::new(r"\s+").unwrap();
-        re.replace_all(&ty_str, "")
-            .to_string()
-            .replace(",)", ")")
-            .replace(",>", ">")
+    }
+
+    fn get_length(&self, len: &ArrayLen) -> u128 {
+        if let ArrayLen::Body(len) = len {
+            let len = self.hir().body(len.body);
+            if let ExprKind::Lit(len) = &len.value.kind {
+                if let LitKind::Int(len, _) = &len.node {
+                    return *len;
+                }
+            }
+        }
+        unreachable!()
     }
 }
 
@@ -707,10 +786,91 @@ impl<'tcx> Visitor<'tcx> for LocalVisitor<'tcx> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Type {
+    Array(Box<Type>, u128),
+    Ptr(Box<Type>, bool),
+    BareFn(Vec<Type>, Box<Type>),
+    Never,
+    Tup(Vec<Type>),
+    Path(String, Vec<Type>),
+}
+
+impl Type {
+    fn clear_len(&mut self) {
+        match self {
+            Type::Array(ty, len) => {
+                ty.clear_len();
+                *len = 0;
+            }
+            Type::Ptr(ty, _) => {
+                ty.clear_len();
+            }
+            Type::BareFn(inputs, ret) => {
+                for input in inputs {
+                    input.clear_len();
+                }
+                ret.clear_len();
+            }
+            Type::Never => {}
+            Type::Tup(tys) => {
+                for ty in tys {
+                    ty.clear_len();
+                }
+            }
+            Type::Path(_, tys) => {
+                for ty in tys {
+                    ty.clear_len();
+                }
+            }
+        }
+    }
+
+    fn subst(&mut self, map: &BTreeMap<String, Type>) {
+        while self.subst_once(map) {}
+    }
+
+    fn subst_once(&mut self, map: &BTreeMap<String, Type>) -> bool {
+        match self {
+            Type::Array(ty, _) => ty.subst_once(map),
+            Type::Ptr(ty, _) => ty.subst_once(map),
+            Type::BareFn(inputs, ret) => {
+                let mut changed = false;
+                for input in inputs {
+                    changed |= input.subst_once(map);
+                }
+                changed |= ret.subst_once(map);
+                changed
+            }
+            Type::Never => false,
+            Type::Tup(tys) => {
+                let mut changed = false;
+                for ty in tys {
+                    changed |= ty.subst_once(map);
+                }
+                changed
+            }
+            Type::Path(path, tys) => {
+                if let Some(new_path) = map.get(path) {
+                    assert_eq!(tys.len(), 0);
+                    *self = new_path.clone();
+                    true
+                } else {
+                    let mut changed = false;
+                    for ty in tys {
+                        changed |= ty.subst_once(map);
+                    }
+                    changed
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct FunSig {
     name: String,
-    params: Vec<String>,
-    ret: String,
+    params: Vec<Type>,
+    ret: Type,
 }
 
 fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
@@ -728,11 +888,6 @@ fn mk_rust_path(dir: &Path, path: &Path, root: &str, name: &str) -> String {
     res += "::";
     res += name;
     res
-}
-
-fn clear_len(s: &str) -> String {
-    let re = regex::Regex::new(r";\d*]").unwrap();
-    re.replace_all(s, ";0]").to_string()
 }
 
 lazy_static! {
