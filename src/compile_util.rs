@@ -196,8 +196,9 @@ impl Emitter for SilentEmitter {
 fn find_deps() -> Options {
     let mut args = vec!["a.rs".to_string()];
 
-    let dep = "deps_crate/target/debug/deps";
-    if let Ok(dir) = std::fs::read_dir(dep) {
+    let dir = std::env::var("DIR").unwrap_or_else(|_| ".".to_string());
+    let dep = format!("{}/deps_crate/target/debug/deps", dir);
+    if let Ok(dir) = std::fs::read_dir(&dep) {
         args.push("-L".to_string());
         args.push(format!("dependency={}", dep));
 
